@@ -191,17 +191,16 @@ class Redistrict(MyBaseClass):
     dst: str = 'sd'
     overwrite: tuple = ()
 
-    def pq(self, x):
-        pq = path_out / f"{self.st}/{x}/{x}.parquet"
-        pq.parent.mkdir(parents=True, exist_ok=True)
-        return pq
-
-    
-    # def pq(self, *x):
-    #     x = x if len(x)>1 else (x[0],x[0])
-    #     pq = path_out / f"{self.st}/{join(x,'/')}.parquet"
+    # def pq(self, x):
+    #     pq = path_out / f"{self.st}/{x}/{x}.parquet"
     #     pq.parent.mkdir(parents=True, exist_ok=True)
     #     return pq
+
+    
+    def pq(self, *x):
+        pq = path_out / f"{self.st}/{join(x,'/')}/{x[-1]}.parquet"
+        pq.parent.mkdir(parents=True, exist_ok=True)
+        return pq
 
 
     def __post_init__(self):
@@ -237,11 +236,8 @@ class Redistrict(MyBaseClass):
 
     def get(self, x, **kwargs):
         if x not in self:
-            fn = self.pq(x)
-            # kwargs = {'fn': self.pq(x)}
-            # if x == 'chain':
-            #     kwargs['dt'] = now()
-            # fn = self.pq(x) if x not in ['chain'] else self.pq(x, now(), x).with_suffix('.h5')
+            fn = self.pq(self.dst, x)
+            # print(fn)
             self[x] = load(fn)
             if self[x] is None:
                 for y in listify(self.depend.get(x)):
@@ -490,7 +486,7 @@ class Redistrict(MyBaseClass):
 
 
     def get_vote(self, fn=None):
-        off = ['president','u.s. sen','govenor','lt. governor ','land comm','attorney gen','rr comm 1','comptroller']
+        off = ['president','u.s. sen','governor','lt. governor','land comm','attorney gen','rr comm 1','comptroller']
         E = self.elec.query("party.isin(['d','r']) & votes>0 & office.isin(@off)")['votes'].sort_index().unstack('party',0).rename_axis(columns=None)
         return self.disagg(E, 'vap_total', 'vtd')
 
@@ -659,9 +655,9 @@ class Redistrict(MyBaseClass):
 
 
     def load_chain(self, idx):
-        fn = self.pq('chain').parent / f"{idx}/chain.h5"
+        fn = self.pq(self.dst, 'chain').parent / f"{idx}/chain.h5"
         try:
-            dct = {k: pd.DataFrame(v[:].T).squeeze().prep(force_int64=False) for k, v in load(fn).items()}
+            dct = {k: pd.DataFrame(v[:].T).squeeze().convert_dtypes() for k, v in load(fn).items()}
             dct['geoid20'].rename('geoid20', inplace=True)
             dct['part'].set_index(dct['geoid20'], inplace=True)
             dct['n_node'], dct['n_step'] = dct['part'].shape
@@ -731,16 +727,17 @@ self = Redistrict(
 # self.get('piece')
 # self.get('vote')
 # self.get('graph')
+self.get('chain', n_step=10000)
 
-for seed in range(5,20):
-    if 'chain' in self:
-        del self.chain
-    print(seed)
-    self.get('chain',
-             n_step=9,
-             idx = seed,
-             seed = seed,
-        )
-    for k in range(self.chain['n_step']):
-        print(k)
-        self.plot(k, show=False)
+# for seed in range(99,100):
+#     if 'chain' in self:
+#         del self.chain
+#     print(seed)
+#     self.get('chain',
+#              n_step=9,
+#              idx = seed,
+#              seed = seed,
+#         )
+#     for k in range(self.chain['n_step']):
+#         print(k)
+#         self.plot(k, show=False)
