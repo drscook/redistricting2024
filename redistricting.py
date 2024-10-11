@@ -1,3 +1,4 @@
+# %matplotlib widget
 import warnings, os, pathlib, shutil, copy, requests, zipfile, dataclasses, us, hashlib, humanfriendly as hf, codetiming
 import numpy as np, pandas as pd, geopandas as gpd, networkx as nx, cudf, cugraph as cugr, h5py
 import matplotlib.pyplot as plt, seaborn as sns, plotly.express as px
@@ -187,14 +188,20 @@ class MyBaseClass():
 class Redistrict(MyBaseClass):
     st: str = 'tx'
     years: tuple = tuple(range(2014,2023))
-    dst: str = 'hd'
+    dst: str = 'sd'
     overwrite: tuple = ()
 
-    def pq(self, *x):
-        x = x if len(x)>1 else (x[0],x[0])
-        pq = path_out / f"{self.st}/{join(x,'/')}.parquet"
+    def pq(self, x):
+        pq = path_out / f"{self.st}/{x}/{x}.parquet"
         pq.parent.mkdir(parents=True, exist_ok=True)
         return pq
+
+    
+    # def pq(self, *x):
+    #     x = x if len(x)>1 else (x[0],x[0])
+    #     pq = path_out / f"{self.st}/{join(x,'/')}.parquet"
+    #     pq.parent.mkdir(parents=True, exist_ok=True)
+    #     return pq
 
 
     def __post_init__(self):
@@ -214,7 +221,9 @@ class Redistrict(MyBaseClass):
             'ed': 'blk',
             'piece': 'blk',
             'vote': ['elec','piece'],
-            'chain': ['blk','edge'],
+            'graph': ['blk','edge'],
+            'chain': 'graph',
+            'blk_simp': 'blk',
         }
         for x in ['overwrite','years']:
             self[x] = listify(self[x])
@@ -228,7 +237,11 @@ class Redistrict(MyBaseClass):
 
     def get(self, x, **kwargs):
         if x not in self:
-            fn = self.pq(x) if x not in ['chain'] else self.pq(x, now(), x).with_suffix('.h5')
+            fn = self.pq(x)
+            # kwargs = {'fn': self.pq(x)}
+            # if x == 'chain':
+            #     kwargs['dt'] = now()
+            # fn = self.pq(x) if x not in ['chain'] else self.pq(x, now(), x).with_suffix('.h5')
             self[x] = load(fn)
             if self[x] is None:
                 for y in listify(self.depend.get(x)):
@@ -236,12 +249,11 @@ class Redistrict(MyBaseClass):
                 timer.restart()
                 print('create', x)
                 self[x] = self[f'get_{x}'](fn=fn, **kwargs)
-                if x not in ['chain']:
+                if x not in ['graph','chain']:
                     self[x] = self[x].prep(cat=True)
                     dump(fn, self[x])
-                # self[x] = dump(fn, self[f'get_{x}'](fn=fn).prep(cat=True))
                 timer.stop()
-            print('loaded', x)
+            # print('loaded', x)
         # display(self[nm].reset_index().dtypes)
 
 
@@ -378,11 +390,19 @@ class Redistrict(MyBaseClass):
         fetch(u, s)
         return load(s).to_crs(self.vtd_shp.crs).set_index('geoid20')
 
+    
     def get_blk_vtd(self, fn=None):
-        B = self.blk_shp[['geometry']]
         V = self.vtd_shp[['geometry']]
+        B = self.blk_shp[['geometry']]
         X = B.sjoin(V, predicate='intersects').set_index(['vtd','cnty'], append=True).join(V, rsuffix='_y')
         return X.intersection(X.pop('geometry_y')).area.rename('area').sort_values().reset_index().groupby('geoid20').last()
+
+    
+    # def get_blk_vtd(self, fn=None):
+    #     B = self.blk_shp[['geometry']].to_crs(self.vtd_shp.crs)
+    #     V = self.vtd_shp[['geometry']]
+    #     X = B.sjoin(V, predicate='intersects').set_index(['vtd','cnty'], append=True).join(V, rsuffix='_y')
+    #     return X.intersection(X.pop('geometry_y')).area.rename('area').sort_values().reset_index().groupby('geoid20').last()
 
     # def get_blk_vtd(self, p=None):
     #     B = self.blk_shp['geometry']
@@ -403,6 +423,13 @@ class Redistrict(MyBaseClass):
             .sort_index()
         )
 
+
+    def get_blk_simp(self, tol=20, fn=None):
+        blk = self.blk.copy()
+        blk.geometry = blk.geometry.buffer(tol).simplify(1).to_crs('EPSG:4326')
+        return blk
+
+
     def get_edge(self, df=None, fn=None):
         df = self.blk if df is None else df
         N = df[['geometry']].rename_axis('idx')
@@ -412,37 +439,12 @@ class Redistrict(MyBaseClass):
             .query('idx_left < idx_right')
             .join(N.rename_axis('idx_right'), rsuffix='_y')
         )
-        return E.intersection(E.pop('geometry_y')).length.rename('leng').rename_axis(['source','target']).sort_index().reset_index()#.query('leng>0')
-
-    # def get_edge(self, p=None):
-    #     B = self.blk[['geometry']]
-    #     X = (
-    #         B.sjoin(B, predicate='intersects')
-    #         .set_index('geoid20_right', append=True)
-    #         .rename_axis(['source', 'destination'])
-    #         .query('source != destination')
-    #         .join(B.rename_axis('destination'), rsuffix='_y')
-    #     )
-    #     return X.intersection(X.pop('geometry_y')).length.rename('leng').reset_index().query('leng>0')
-    
-    # def get_edge(self, p=None):
-    #     A = self.blk[['geometry']]
-    #     X = A.sjoin(A, predicate='intersects').query('geoid20_left != geoid20_right').drop_duplicates().reset_index()
-    #     E = X.filter(like='geoid20').set_axis(['src','trg'], axis=1).copy()
-    #     Y = A.rename_axis('geoid20_right').reset_index().merge(X.pop('geoid20_right').reset_index()).set_index('index').sort_index()
-    #     I = X.intersection(Y)
-    #     E['leng'] = I.length
-    #     return E
+        return E.intersection(E.pop('geometry_y')).length.rename('leng').rename_axis(['source','destination']).sort_index().reset_index()#.query('leng>0')
 
 
     def dissolve(self, by):
         agg = {k: 'sum' if '_' in k else lambda x: x.mode()[0] for k in self.blk.columns if k != 'geometry'}
         return self.blk.dissolve(by, aggfunc=agg).assign(leng=lambda x:x.length, area=lambda x:x.area).sort_index()
-
-    # def dissolve(self, x):
-    #     self.get('blk')
-    #     agg = {k: 'sum' if '_' in k else lambda x: x.mode()[0] for k in self.blk.columns if k != 'geometry'}
-    #     return self.blk.dissolve(by=x, aggfunc=agg).assign(leng=lambda x:x.length, area=lambda x:x.area).sort_index()
 
     def get_cnty(self, fn=None):
         return self.dissolve(self.blk['cnty'])
@@ -493,48 +495,82 @@ class Redistrict(MyBaseClass):
         return self.disagg(E, 'vap_total', 'vtd')
 
 
-    def get_chain(self, n_step=4, n_root=25, fn=None):
-        def get_err(v):
-            return abs(v-1)
-        def get_dfct(part):
-            return cnty.join(part).drop_duplicates().groupby('cnty').size()
-            # return cnty.join(part).drop_duplicates().shape[0]
-        def get_hash(part):
-            Y = sorted(sorted(x) for x in part.to_pandas().groupby('dst').groups.values())
-            return hashlib.sha256(str(Y).encode()).hexdigest()
-        def get_pairs(part, pairs=True, pp=True):
-            E = edge.merge(part, left_on='source', right_on='geoid20').merge(part, left_on='target', right_on='geoid20', suffixes=('','_y'))
-            mask = E['dst'] == E['dst_y']
-            L = [None, None]
-            if pairs:
-                L[0] = E.loc[~mask,['dst','dst_y']].drop_duplicates().sort_index()
-            if pp:
-                P = node.join(part).groupby('dst')[['leng','area']].sum()
-                P -= 2 * E[mask].groupby('dst')[['leng']].sum().assign(area=0)
-                L[1] = (4*np.pi * P['area'] / P['leng']**2)
-            return L
+    def get_graph(self, fn=None):
+        self.nodes = cudf.from_pandas(self.blk.drop(columns='geometry'))
+        self.edges = cudf.from_pandas(self.edge)
+        self.G = cugr.Graph()
+        self.G.from_cudf_edgelist(self.edges, edge_attr='leng')
+
+        part = self.nodes[self.dst].rename('dst')
+        pair = self.get_pair(part)[0].to_pandas()
+        def f(seed):
+            perm = dict(enumerate(np.random.default_rng(seed).permutation(part.nunique())))
+            return pair.replace(perm).var(axis=1).sum(), perm
+        dct = dict(f(seed) for seed in range(100))
+        self.color = pd.Series(dct[max(dct)]).rename_axis(self.dst).rename('clr').to_frame()
+        # 
+
+        # self.G.from_cudf_edgelist(self.edges, destination='target', edge_attr='leng')
+        # self.cntys = self.nodes['cnty'].to_frame()
+        # # part = node[self.dst].rename('dst').to_frame()
+        # self.n_nodes = self.nodes.shape[0]
+        # self.n_cntys = self.cntys.nunique().squeeze()
+        # self.n_parts = part.nodes[self.dst].nunique().squeeze()
+        # pop = node['all_total']
+        # seat = (pop / pop.sum() * n_part).rename('seat').to_frame()
+
+
+    def get_hash(self, part):
+        Y = sorted(sorted(x) for x in part.to_pandas().groupby('dst').groups.values())
+        return hashlib.sha256(str(Y).encode()).hexdigest()
+
+
+    def get_pair(self, part, pair=True, pp=True):
+        # E = self.edges.merge(part, left_on='source', right_on='geoid20').merge(part, left_on='target', right_on='geoid20', suffixes=('','_y'))
+        E = self.edges.merge(part, left_on='source', right_on='geoid20').merge(part, left_on='destination', right_on='geoid20', suffixes=('','_y'))
+        mask = E['dst'] == E['dst_y']
+        L = [None, None]
+        if pair:
+            # L[0] = E.loc[~mask,['dst','dst_y']].drop_duplicates().sort_index()
+            L[0] = E.loc[~mask,['dst','dst_y']].drop_duplicates().sort_index().rename(columns={'dst':'source','dst_y':'destination'})
+        if pp:
+            P = self.nodes.join(part).groupby('dst')[['leng','area']].sum()
+            P -= 2 * E[mask].groupby('dst')[['leng']].sum().assign(area=0)
+            L[1] = (4*np.pi * P['area'] / P['leng']**2)
+        return L
+
+    
+    def get_dfct(self, part):
+        return self.nodes[['cnty']].join(part).drop_duplicates().groupby('cnty').size()
+
+
+    def get_chain(self, n_step=4, n_root=25, seed=42, idx=None, fn=None):
+        idx = now() if idx is None else idx
+        fn = self.load_chain(idx)
+        if isinstance(fn, dict):
+            return fn
+        print(fn)
+        get_err = lambda v: abs(v-1)
         def record(dct):
             dct['part'].append(part.squeeze().astype('uint8').sort_index().values_host)
             dct['dfct'].append(dfct.sort_index().values_host)
             dct['pp'  ].append(pp.sort_index().values_host)
             dct['hash'].append(hash)
             return dct
+        part = self.nodes[self.dst].rename('dst').to_frame()
+        part -= part.min()
+        dfct = self.get_dfct(part)
+        pair, pp = self.get_pair(part)
+        hash = self.get_hash(part)
 
-        edge = cudf.from_pandas(self.edge)
-        G = cugr.Graph()
-        G.from_cudf_edgelist(edge, destination='target', edge_attr='leng')
-        node = cudf.from_pandas(self.blk.drop(columns='geometry'))
-        cnty = node['cnty'].to_frame()
-        part = node[self.dst].rename('dst').to_frame()
-        n_node = node.shape[0]
-        n_cnty = cnty.nunique().squeeze()
+        n_node = self.nodes.shape[0]
         n_part = part.nunique().squeeze()
-        pop = node['all_total']
+        n_cnty = dfct.shape[0]
+        
+        pop = self.nodes['all_total']
         seat = (pop / pop.sum() * n_part).rename('seat').to_frame()
-        dfct = get_dfct(part)
-        pairs, pp = get_pairs(part)
-        hash = get_hash(part)
         rec = record({k:[] for k in ['part','dfct','pp','hash']})
+        fn.parent.mkdir(parents=True, exist_ok=True)
         with h5py.File(fn, 'w') as h5f:
             h5f.create_dataset('geoid20', data=self.blk.index.values)
             h5f.create_dataset('part', shape=[n_step+1, n_node], maxshape=[None, n_node], dtype='uint8')
@@ -544,16 +580,16 @@ class Redistrict(MyBaseClass):
         err_thresh = 0.05
         pp_thresh = pp.median()
         dfct_thresh = dfct.sum()
-        seed = 0
+        # seed = 0
         head = 0
         timer.restart()
         while len(rec['hash']) <= n_step:
             # dfct_thresh = get_dfct(part)
             done = False
-            for i, pair in pairs.sample(frac=1, random_state=seed).T.items():
-                U = part[part['dst'].isin(pair)]
+            for i, pr in pair.sample(frac=1, random_state=seed).T.items():
+                U = part[part['dst'].isin(pr)]
                 q = U.join(seat)['seat'].sum()
-                H = cugr.subgraph(G, U.index)
+                H = cugr.subgraph(self.G, U.index)
                 C = cugr.degree_centrality(H)
                 C = C.sort_values(by=C.columns, ascending=False)
                 for j in range(n_root):
@@ -575,11 +611,11 @@ class Redistrict(MyBaseClass):
                         P = T.reset_index().merge(S.reset_index()).set_index('geoid20')['dst']
                         new_part = part.copy()
                         new_part.update(P)
-                        dfct = get_dfct(new_part)
+                        dfct = self.get_dfct(new_part)
                         if dfct.sum() <= dfct_thresh:
-                            pairs, pp = get_pairs(new_part)
+                            pair, pp = self.get_pair(new_part)
                             if pp.median() >= pp_thresh:
-                                new_hash = get_hash(new_part)
+                                new_hash = self.get_hash(new_part)
                                 if new_hash != hash:
                                     part = new_part
                                     hash = new_hash
@@ -619,18 +655,40 @@ class Redistrict(MyBaseClass):
                     s = r*(n_step+1)
                     print(f"{r:.2f} seconds per step = {hf.format_timespan(s)} total with {hf.format_timespan(s-t)} remaining for {n_step} steps")
         print(fn)
-        return fn
+        return self.load_chain(fn.parts[-2])
 
-    def load_chain(self, dt=None):#fn=None):
-        fn = self.chain if dt is None else self.pq('chain', dt, 'chain').with_suffix('.h5')
-        dct = {k: pd.DataFrame(v[:].T).squeeze().prep(force_int64=False) for k, v in load(fn).items()}
+
+    def load_chain(self, idx):
+        fn = self.pq('chain').parent / f"{idx}/chain.h5"
         try:
-            dct['part'].set_index(self.blk.index, inplace=True)
-        except:
+            dct = {k: pd.DataFrame(v[:].T).squeeze().prep(force_int64=False) for k, v in load(fn).items()}
             dct['geoid20'].rename('geoid20', inplace=True)
             dct['part'].set_index(dct['geoid20'], inplace=True)
-        return dct
+            dct['n_node'], dct['n_step'] = dct['part'].shape
+            dct['idx'] = idx
+            dct['fn'] = lambda k=None: fn if k is None else fn.with_name(f"fig{pattern(k, dct['n_step'], 0)}.png")
+            return dct
+        except:
+            return fn
 
+
+    def plot(self, k, save=True, show=True):
+        self.get('blk_simp')
+        clr = self.chain['part'][k].replace(self.color.squeeze().to_dict())
+        self.blk_simp.assign(clr=clr).plot(
+            column='clr',
+            cmap='jet',
+            figsize=(6,6),
+            linewidth=0,
+            edgecolor=None,
+            alpha=1,
+        )
+        if save:
+            plt.savefig(self.chain['fn'](k))
+        if show:
+            plt.show()
+        else:
+            plt.close()
 
 # rm(path_out)
 self = Redistrict(
@@ -652,6 +710,7 @@ self = Redistrict(
         # 'edge',
         # 'piece',
         # 'vote',
+        # 'blk_simp',
     ],
 )
 # self.get('pl')
@@ -661,6 +720,7 @@ self = Redistrict(
 # self.get('blk_shp')
 # self.get('blk_vtd')
 # self.get('blk')
+# self.get('blk_simp')
 # self.get('edge')
 # self.get('cnty')
 # self.get('vtd')
@@ -670,5 +730,17 @@ self = Redistrict(
 # self.get('ed')
 # self.get('piece')
 # self.get('vote')
-self.get('chain', n_step=10000)
-# chain = self.load_chain('2024-10-09_18:25:08')
+# self.get('graph')
+
+for seed in range(5,20):
+    if 'chain' in self:
+        del self.chain
+    print(seed)
+    self.get('chain',
+             n_step=9,
+             idx = seed,
+             seed = seed,
+        )
+    for k in range(self.chain['n_step']):
+        print(k)
+        self.plot(k, show=False)
